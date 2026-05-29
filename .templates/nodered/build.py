@@ -111,11 +111,10 @@ def main():
     with open(r'%s/Dockerfile.template' % serviceTemplate, 'r') as dockerTemplate:
       templateData = dockerTemplate.read()
 
-    with open(r'%s' % addonsFile) as objAddonsFile:
-      addonsSelected = yaml.load(objAddonsFile)
-
     addonsInstallCommands = ""
     if os.path.exists(addonsFile):
+      with open(r'%s' % addonsFile) as objAddonsFile:
+        addonsSelected = yaml.load(objAddonsFile)
       installCommand = addonsSelected["dockerFileInstallCommand"]
       for (index, addonName) in enumerate(addonsSelected["addons"]):
         if (addonName == 'node-red-node-sqlite'): # SQLite requires a special param
@@ -125,8 +124,15 @@ def main():
 
     templateData = templateData.replace(dockerfileTemplateReplace, addonsInstallCommands)
 
-    with open(r'%s/Dockerfile' % serviceService, 'w') as dockerTemplate:
-      dockerTemplate.write(templateData)
+    dockerfilePath = r'%s/Dockerfile' % serviceService
+    try:
+      with open(dockerfilePath, 'w') as dockerTemplate:
+        dockerTemplate.write(templateData)
+    except PermissionError:
+      print("Error: Permission denied writing '{path}'.".format(path=dockerfilePath))
+      print("This can happen if a previous build was run as root.")
+      print("Fix with: sudo chown $USER:$USER {path}".format(path=dockerfilePath))
+      return False
     print("Finished NodeRed Build script")
     time.sleep(0.3)
     return True
