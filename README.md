@@ -2,6 +2,21 @@
 
 IOTstack is a builder for docker-compose to easily make and maintain IoT stacks on the Raspberry Pi.
 
+## fork note for Debian 13 amd64
+
+This repository is a fork of [SensorsIot/IOTstack](https://github.com/SensorsIot/IOTstack). The upstream project remains the primary source for documentation, features, and general project direction.
+
+This fork keeps the upstream structure and documentation as intact as possible, but changes the setup path for a specific target environment:
+
+* Debian 13 only
+* amd64 only
+* `install.sh` rewritten to validate Debian 13 and amd64 explicitly
+* `menu.sh` rewritten to align its preflight checks and installer integration with the Debian 13 amd64 setup
+* Docker installation uses the official `get.docker.com` convenience installer
+* Raspberry Pi specific assumptions were removed from the installer path where they do not apply to Debian 13 amd64
+
+This fork is intended for Debian 13 amd64 deployments and should not be treated as an official upstream-supported target. If you are using Raspberry Pi OS or other upstream-supported environments, prefer the original repository.
+
 ## introduction to IOTstack - videos
 
 IOTstack changes a fair bit so YouTube videos only reflect a moment in time and tend to date quickly. These videos contain excellent overviews but you should rely more on the written documentation than anything you see in the videos.

@@ -1,261 +1,159 @@
 #!/usr/bin/env bash
 
-# version - MUST be exactly 7 characters!
-UPDATE="2026v02"
+# version - keep exactly 7 chars for compatibility with upstream tooling
+UPDATE="2026d13"
 
-#----------------------------------------------------------------------
-# The intention of this script is that it should be able to be run
-# multiple times WITHOUT doing any harm. If you propose changes, please
-# make sure you test the script in both a "green fields" system AND on
-# a working system where docker, docker-compose and IOTstack are already
-# installed.
-#----------------------------------------------------------------------
-
-# overuse of sudo is a very common problem among new IOTstack users
+# The installer should be safe to run repeatedly.
 [ "$EUID" -eq 0 ] && echo "This script should NOT be run using sudo" && exit 1
 
-# the name of this script is
 SCRIPT=$(basename "${0}")
-
-# where is this script is running?
 WHERE=$(dirname "$(realpath "$0")")
 
-# if this script looks like it is running in a clone (or unzip) of
-# IOTstack then base operations there, otherwise default to the
-# standard location of ~/IOTstack. Either way, permit override by
-# prepending IOTSTACK=path to the script call.
-[ -d "$WHERE/.templates" -a -d "$WHERE/docs" ] && PROJECT="$WHERE" || PROJECT="$HOME/IOTstack"
+[ -d "$WHERE/.templates" ] && [ -d "$WHERE/docs" ] && PROJECT="$WHERE" || PROJECT="$HOME/IOTstack"
 IOTSTACK=${IOTSTACK:-"$PROJECT"}
 
-# derived path(s) - note that the menu knows about most of these so
-# they can't just be changed without a lot of care.
 IOTSTACK_ENV="$IOTSTACK/.env"
 IOTSTACK_MENU_REQUIREMENTS="$IOTSTACK/requirements-menu.txt"
 IOTSTACK_MENU_VENV_DIR="$IOTSTACK/.virtualenv-menu"
 IOTSTACK_INSTALLER_HINT="$IOTSTACK/.new_install"
 
-# the expected installation location of docker-compose-plugin is
-COMPOSE_PLUGIN_PATH="/usr/libexec/docker/cli-plugins/docker-compose"
-
-# the default location of a symlink in the PATH pointing to the above is
+COMPOSE_PLUGIN_CANDIDATES="/usr/libexec/docker/cli-plugins/docker-compose /usr/lib/docker/cli-plugins/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose"
 COMPOSE_SYMLINK_PATH="/usr/local/bin/docker-compose"
 
-# add these to /boot/cmdline.txt (if it exists)
-CMDLINE_OPTIONS="cgroup_memory=1 cgroup_enable=memory"
+APT_DEPENDENCIES="ca-certificates curl git jq pwgen python3-pip python3-dev python3-virtualenv rsync sqlite3 uuid-runtime whiptail"
 
-# dependencies installed via apt
-APT_DEPENDENCIES="curl git jq pwgen python3-pip python3-dev python3-virtualenv rsync sqlite3 uuid-runtime whiptail"
-
-# minimum version requirements
 DOCKER_VERSION_MINIMUM="24"
 COMPOSE_VERSION_MINIMUM="2.20"
 PYTHON_VERSION_MINIMUM="3.9"
 
-# best-practice for group membership
 DESIRED_GROUPS="docker bluetooth dialout"
 
-# what to do at script completion (reboot takes precedence)
 REBOOT_REQUIRED=false
 LOGOUT_REQUIRED=false
 
-#----------------------------------------------------------------------
-# versioning functions
-#----------------------------------------------------------------------
-
-# version_json()
-#
-# Arguments
-#    $1 exit code
-# Returns:
-#    JSON string with version, commit ID and exit code
-# Note:
-#    If $SCRIPT is not under Git control (eg a zip download of IOTstack)
-#    then the commit field will be an empty string.
-#
 version_json() {
-	local commitID=$(git -C "${IOTSTACK}" log -n 1 --pretty=format:%H -- "${SCRIPT}" 2>/dev/null)
-	echo "{\"version\": \"${UPDATE}\", \"commit\": \"${commitID}\", \"exitCode\": ${1}}"
+    local commitID
+    commitID=$(git -C "${IOTSTACK}" log -n 1 --pretty=format:%H -- "${SCRIPT}" 2>/dev/null)
+    echo "{\"version\": \"${UPDATE}\", \"commit\": \"${commitID}\", \"exitCode\": ${1}}"
 }
 
-
-# should_run_installer()
-#
-# Arguments
-#    none
-# Returns
-#    "false" or "true"
-# Theory:
-#    Under normal conditions, running install.sh will result in the
-#    hint file (.new_install) having the JSON string returned by
-#    version_json(), which contains the current version number and
-#    current commit ID of install.sh, plus an exit code of zero.
-#
-#    If IOTstack is downloaded as a zip rather than a clone, the commit
-#    ID will be null but, other than placing a heavier reliance on the
-#    version number **changing**, that does not actually matter.
-#
-#    Historically, .new_install has evolved through three generations:
-#
-#    Gen 1: A touch file where its mere existence signalled that
-#           install.sh had been run.
-#    Gen 2: A file recording the exit code of the most-recent run. The
-#           menu has never actually taken advantage of this.
-#    Gen 3: The JSON string returned by version_json().
-#
-#    This function will return "true" if any of the following is true:
-#
-#    1. install.sh has never been run to perform an installation (or
-#       PiBuilder has not faked things on this script's behalf). In
-#       other words, this is the situation where .new_install is absent.
-#    2. The last run of install.sh either produced a Gen 2 file
-#       (irrespective of the exit code value) or a Gen 3 file with a
-#       non-zero exit code.
-#    3. Either/both the embedded version number or commit ID have
-#       changed as a result of an update.
-#
 should_run_installer() {
-	# does the hint file exist and is it non-empty?
-	if [ -s "${IOTSTACK_INSTALLER_HINT}" ] ; then
-		# yes! compare content
-		if [ "$(cat "${IOTSTACK_INSTALLER_HINT}")" = "$(version_json 0)" ] ; then
-			echo "false"
-			return
-		fi
-	fi
-	echo "true"
+    if [ -s "${IOTSTACK_INSTALLER_HINT}" ] ; then
+        if [ "$(cat "${IOTSTACK_INSTALLER_HINT}")" = "$(version_json 0)" ] ; then
+            echo "false"
+            return
+        fi
+    fi
+    echo "true"
 }
 
-
-#----------------------------------------------------------------------
-# arguments
-#----------------------------------------------------------------------
-
-# any arguments passed on command-line?
 if [ $# -gt 0 ] ; then
+    case "${1}" in
+        "version" )
+            echo "$(version_json 0)"
+        ;;
+        "should_run_installer" )
+            echo "$(should_run_installer)"
+        ;;
+        * )
+            cat <<HELP
 
-	# vector on command verb
-	case "${1}" in
+                Usage:
+                  ${SCRIPT} (with no arguments runs the installer)
+                  ${SCRIPT} version - returns JSON version string
+                  ${SCRIPT} should_run_installer - returns "false" or "true"
+                  ${SCRIPT} help - displays this menu
 
-		"version" )
-			echo "$(version_json 0)"
-		;;
-
-		"should_run_installer" )
-			echo "$(should_run_installer)"
-		;;
-
-		*)
-			cat <<-HELP
-
-				Usage:
-				  ${SCRIPT} (with no arguments runs the installer)
-				  ${SCRIPT} version - returns JSON version string
-				  ${SCRIPT} should_run_installer - returns "false" or "true"
-				  ${SCRIPT} help - displays this menu
-
-			HELP
-		;;
-
-	esac
-
-	# normal exit (ie does not fall through to the menu)
-	exit 0
-
+HELP
+        ;;
+    esac
+    exit 0
 fi
 
+handle_exit() {
+    [ -d "$IOTSTACK" ] && echo "$(version_json $1)" >"$IOTSTACK_INSTALLER_HINT"
 
-#----------------------------------------------------------------------
-# main installer code
-#----------------------------------------------------------------------
+    echo -n "${SCRIPT} completed"
+    [ "$1" -ne 0 ] && echo -n " - but should be re-run"
 
-echo "                                         "
-echo "  _____ ____ _______  _  installer  _    "
-echo " |_   _/ __ \\__   __|| |  $UPDATE  | |  "
-echo "   | || |  | | | |___| |_ __ _  ___| | __"
-echo "   | || |  | | | / __| __/ _\` |/ __| |/ /"
-echo "  _| || |__| | | \\__ \\ || (_| | (__|   < "
-echo " |_____\\____/  |_|___/\\__\\__,_|\\___|_|\\_\\"
-echo "                                         "
-echo "                                         "
+    if [ "$REBOOT_REQUIRED" = "true" ] ; then
+        echo " - a reboot is required."
+        sleep 2
+        sudo reboot
+    elif [ "$LOGOUT_REQUIRED" = "true" ] ; then
+        echo " - a logout is required."
+        sleep 2
+        for ANCESTOR in $(ps -o ppid=) ; do
+            if [ "$(ps -p "$ANCESTOR" -o user= 2>/dev/null)" = "$USER" ] ; then
+                kill -HUP "$ANCESTOR" 2>/dev/null
+                break
+            fi
+        done
+        sleep 2
+    fi
 
-#----------------------------------------------------------------------
-#						Check script dependencies
-#----------------------------------------------------------------------
+    echo ""
+    exit "$1"
+}
+
+resolve_compose_plugin_path() {
+    local p
+    for p in $COMPOSE_PLUGIN_CANDIDATES ; do
+        if [ -f "$p" ] ; then
+            echo "$p"
+            return 0
+        fi
+    done
+    return 1
+}
+
+should_add_user_to_group() {
+    grep -q "^$1:" /etc/group || return 1
+    groups | grep -q "\\b$1\\b" && return 1
+    return 0
+}
+
+is_python_script() {
+    [ "$(file -b "$1" 2>/dev/null | grep -c "^Python script")" -gt 0 ] && return 0
+    return 1
+}
+
+echo "IOTstack installer (${UPDATE}) for Debian 13 amd64"
 
 echo -e -n "\nChecking operating-system environment - "
-# This script assumes apt and dpkg are available. That's more-or-less
-# the same as saying Debian oe Debian-derived. If apt and/or dpkg are
-# missing then there's not much that can be done.
-if [ -z $(which apt) -o -z $(which dpkg) ] ; then
-	echo "fail"
-	unset ID
-	[ -f "/etc/os-release" ] && eval $(grep "^ID=" /etc/os-release)
-	if [ "$ID" = "debian" ] ; then
-		echo "This system looks like it is based on Debian but seems to be missing"
-		echo "some key utilities (apt and/or dpkg). That suggests something is wrong."
-		echo "This script can't proceed until those issues are resolved."
-	else
-		echo "Some key utilities that are needed by this script seem to be missing"
-		echo "from this system. Both the Advanced Package Tool (apt) and the Debian"
-		echo "Package Manager (dpkg) are core components of Debian and Debian-derived"
-		echo "distributions like Raspberry Pi OS (aka Raspbian). It looks like you"
-		echo "might be trying to install IOTstack on a system which isn't based on"
-		echo "Debian. IOTstack has only ever been tested on Debian-based distributions"
-		echo "and is not qualified for other Linux or Unix distributions. This script"
-		echo "can't proceed."
-	fi
-	# direct exit - not via handle_exit()
-	exit 1
-else
-	echo "pass"
+if ! command -v apt >/dev/null 2>&1 || ! command -v dpkg >/dev/null 2>&1 ; then
+    echo "fail"
+    echo "This script requires Debian tooling (apt + dpkg)."
+    exit 1
 fi
 
+if [ ! -f /etc/os-release ] ; then
+    echo "fail"
+    echo "Unable to verify OS version because /etc/os-release is missing."
+    exit 1
+fi
 
-#----------------------------------------------------------------------
-#					script memory (exit conditions)
-#----------------------------------------------------------------------
+. /etc/os-release
+ARCHITECTURE="$(dpkg --print-architecture 2>/dev/null)"
 
-function handle_exit() {
+if [ "$ID" != "debian" ] ; then
+    echo "fail"
+    echo "This installer targets Debian 13 only. Detected ID=$ID."
+    exit 1
+fi
 
-	# record the exit condition (if possible)
-	[ -d "$IOTSTACK" ] && echo "$(version_json $1)" >"$IOTSTACK_INSTALLER_HINT"
+if [ "${VERSION_ID}" != "13" ] ; then
+    echo "fail"
+    echo "This installer targets Debian 13 only. Detected VERSION_ID=${VERSION_ID}."
+    exit 1
+fi
 
-	# inform the user
-	echo -n "install.sh completed"
-
-	# advise if should be re-run
-	[ $1 -ne 0 ] && echo -n " - but should be re-run"
-
-	# reboot takes precedence over logout
-	if [ "$REBOOT_REQUIRED" = "true" ] ; then
-		echo " - a reboot is required."
-		sleep 2
-		sudo reboot
-	elif [ "$LOGOUT_REQUIRED" = "true" ] ; then
-		echo " - a logout is required."
-		sleep 2
-		# iterate ancestor processes
-		for ANCESTOR in $(ps -o ppid=) ; do
-			# find first process belonging to current user
-			if [ "$(ps -p $ANCESTOR -o user=)" = "$USER" ] ; then
-				# kill it
-				kill -HUP $ANCESTOR
-			fi
-		done
-		# should not reach this
-		sleep 2
-	fi
-
-	# exit as instructed
-	echo ""
-	exit $1
-
-}
-
-
-#----------------------------------------------------------------------
-#				IOTstack dependencies installed via apt
-#----------------------------------------------------------------------
+if [ "$ARCHITECTURE" != "amd64" ] ; then
+    echo "fail"
+    echo "This installer targets amd64 only. Detected architecture=${ARCHITECTURE}."
+    exit 1
+fi
+echo "pass"
 
 echo -e "\nUpdating Advanced Package Tool (apt) caches"
 sudo apt update
@@ -263,275 +161,159 @@ sudo apt update
 echo -e "\nInstalling/updating IOTstack dependencies"
 sudo apt install -y $APT_DEPENDENCIES
 
-
-#----------------------------------------------------------------------
-#						docker + compose installation
-#----------------------------------------------------------------------
-
-# is docker installed?
-if [ -z $(which docker) ] ; then
-	# no! use the convenience script
-	echo -e "\nInstalling docker and docker-compose-plugin using the 'convenience script'"
-	echo "from https://get.docker.com ..."
-	curl -fsSL https://get.docker.com | sudo sh
-	if [ $? -eq 0 ] ; then
-		echo -e "\nInstallation of docker and docker-compose-plugin completed normally."
-		REBOOT_REQUIRED=true
-	else
-		echo -e "\nThe 'convenience script' returned an error. Unable to proceed."
-		handle_exit 1
-	fi
+if ! command -v docker >/dev/null 2>&1 ; then
+    echo -e "\nInstalling docker and compose plugin from https://get.docker.com ..."
+    curl -fsSL https://get.docker.com | sudo sh
+    if [ $? -eq 0 ] ; then
+        echo -e "\nInstallation of Docker completed normally."
+        REBOOT_REQUIRED=true
+    else
+        echo -e "\nThe Docker convenience script returned an error."
+        handle_exit 1
+    fi
 else
-	echo -e -n "\nDocker is already installed - checking your version - "
-	DOCKER_VERSION_INSTALLED="$(docker version -f "{{.Server.Version}}")"
-	if dpkg --compare-versions "$DOCKER_VERSION_MINIMUM" "gt" "$DOCKER_VERSION_INSTALLED" ; then
-		echo "fail"
-		echo "You have an obsolete version of Docker installed:"
-		echo "      Minimum version required: $DOCKER_VERSION_MINIMUM"
-		echo "   Version currently installed: $DOCKER_VERSION_INSTALLED"
-		echo "Try updating your system by running:"
-		echo "   \$ sudo apt update && sudo apt upgrade -y"
-		echo "   \$ docker version -f {{.Server.Version}}"
-		echo "If the version number changes, try re-running this script. If the"
-		echo "version number does not change, you may need to uninstall both"
-		echo "docker and docker-compose. If any containers are running, stop"
-		echo "them, then run:"
-		echo "   \$ sudo systemctl stop docker.service"
-		echo "   \$ sudo systemctl disable docker.service"
-		echo "   \$ sudo apt -y purge docker-ce docker-ce-cli containerd.io docker-compose"
-		echo "   \$ sudo apt -y autoremove"
-		echo "   \$ sudo reboot"
-		echo "and then re-run this script after the reboot."
-		handle_exit 1
-	else
-		echo "pass"
-	fi
+    echo -e -n "\nDocker is already installed - checking your version - "
+    DOCKER_VERSION_INSTALLED="$(docker version -f "{{.Server.Version}}" 2>/dev/null)"
+    if [ -z "$DOCKER_VERSION_INSTALLED" ] ; then
+        echo "fail"
+        echo "Unable to read Docker version. Is dockerd running?"
+        handle_exit 1
+    fi
+    if dpkg --compare-versions "$DOCKER_VERSION_MINIMUM" gt "$DOCKER_VERSION_INSTALLED" ; then
+        echo "fail"
+        echo "Minimum required Docker version: $DOCKER_VERSION_MINIMUM"
+        echo "Installed Docker version: $DOCKER_VERSION_INSTALLED"
+        handle_exit 1
+    fi
+    echo "pass"
 fi
 
-
-#----------------------------------------------------------------------
-#							group memberships
-#----------------------------------------------------------------------
-
-function should_add_user_to_group()
-{
-	# sense group does not exist
-	grep -q "^$1:" /etc/group || return 1
-	# sense group exists and user is already a member
-	groups | grep -q "\b$1\b" && return 1
-	# group exists, user should be added
-	return 0
-}
-
-# check group membership
 echo -e -n "\nChecking group memberships"
 for GROUP in $DESIRED_GROUPS ; do
-	echo -n " - $GROUP "
-	if should_add_user_to_group $GROUP ; then
-		echo -n "adding $USER"
-		sudo /usr/sbin/usermod -G $GROUP -a $USER
-		LOGOUT_REQUIRED=true
-	else
-		echo -n "pass"
-	fi
+    echo -n " - $GROUP "
+    if should_add_user_to_group "$GROUP" ; then
+        echo -n "adding $USER"
+        sudo /usr/sbin/usermod -G "$GROUP" -a "$USER"
+        LOGOUT_REQUIRED=true
+    else
+        echo -n "pass"
+    fi
 done
 echo ""
 
-#----------------------------------------------------------------------
-#					docker-compose setup/verification
-#----------------------------------------------------------------------
-
-# Correct installation of docker-compose is defined as the result of
-# `which docker-compose` (typically $COMPOSE_SYMLINK_PATH) being a
-# symlink pointing to the expected location of docker-compose-plugin as
-# it is installed by the convenience script ($COMPOSE_PLUGIN_PATH).
-# Alternatively, if `which docker-compose` returns null but the plugin
-# is in the expected location, the necessary symlink can be created by
-# this script and then docker-compose will be installed "correctly".
-
-function is_python_script() {
-	[ $(file -b "$1" | grep -c "^Python script") -gt 0 ] && return 0
-	return 1
-}
-
-# presume docker-compose not installed correctly
 COMPOSE_INSTALLED_CORRECTLY=false
+COMPOSE_CMD_PATH="$(command -v docker-compose 2>/dev/null)"
+COMPOSE_PLUGIN_PATH="$(resolve_compose_plugin_path)"
 
-# search for docker-compose in the PATH
-COMPOSE_CMD_PATH=$(which docker-compose)
-
-# is docker-compose in the PATH?
 echo -e -n "\nChecking whether docker-compose is installed correctly - "
 if [ -n "$COMPOSE_CMD_PATH" ] ; then
-	# yes! is it a symlink and does the symlink point to a file?
-	if [ -L "$COMPOSE_CMD_PATH" -a -f "$COMPOSE_CMD_PATH" ] ; then
-		# yes! fetch the inode of what the link points to
-		COMPOSE_CMD_INODE=$(stat -c "%i" -L "$COMPOSE_CMD_PATH")
-		# does the plugin exist at the expected path?
-		if [ -f "$COMPOSE_PLUGIN_PATH" ] ; then
-			# yes! fetch the plugin's inode
-			COMPOSE_PLUGIN_INODE=$(stat -c "%i" "$COMPOSE_PLUGIN_PATH")
-			# are the inodes the same?
-			if [ $COMPOSE_CMD_INODE -eq $COMPOSE_PLUGIN_INODE ] ; then
-				# yes! thus docker-compose is installed correctly
-				COMPOSE_INSTALLED_CORRECTLY=true
-			fi
-		fi
-	fi
+    if [ -L "$COMPOSE_CMD_PATH" ] && [ -f "$COMPOSE_CMD_PATH" ] && [ -n "$COMPOSE_PLUGIN_PATH" ] ; then
+        COMPOSE_CMD_INODE="$(stat -c "%i" -L "$COMPOSE_CMD_PATH")"
+        COMPOSE_PLUGIN_INODE="$(stat -c "%i" "$COMPOSE_PLUGIN_PATH")"
+        if [ "$COMPOSE_CMD_INODE" -eq "$COMPOSE_PLUGIN_INODE" ] ; then
+            COMPOSE_INSTALLED_CORRECTLY=true
+        fi
+    fi
 else
-	# no! does the plugin exist at the expected location?
-	if [ -f "$COMPOSE_PLUGIN_PATH" ] ; then
-		# yes! so, no command, but plugin present. Fix with symlink
-		sudo ln -s "$COMPOSE_PLUGIN_PATH" "$COMPOSE_SYMLINK_PATH"
-		# and now compose is installed correctly
-		COMPOSE_INSTALLED_CORRECTLY=true
-	else
-		echo "fail"
-		echo "Your system has docker installed but doesn't seem to have either"
-		echo "docker-compose or docker-compose-plugin. Try running:"
-		echo "   \$ sudo apt install -y docker-compose-plugin"
-		echo "and then try re-running this script."
-		handle_exit 1
-	fi
+    if [ -n "$COMPOSE_PLUGIN_PATH" ] ; then
+        sudo ln -sf "$COMPOSE_PLUGIN_PATH" "$COMPOSE_SYMLINK_PATH"
+        COMPOSE_INSTALLED_CORRECTLY=true
+        COMPOSE_CMD_PATH="$COMPOSE_SYMLINK_PATH"
+    fi
 fi
 
-# is docker-compose installed correctly?
 if [ "$COMPOSE_INSTALLED_CORRECTLY" = "true" ] ; then
-	echo "pass"
-	echo -e -n "\nChecking your version of docker-compose - "
-	COMPOSE_VERSION_INSTALLED="$(docker-compose version --short)"
-	if dpkg --compare-versions "$COMPOSE_VERSION_MINIMUM" "gt" "$COMPOSE_VERSION_INSTALLED" ; then
-		echo "fail"
-		echo "You have an obsolete version of docker-compose installed:"
-		echo "      Minimum version required: $COMPOSE_VERSION_MINIMUM"
-		echo "   Version currently installed: $COMPOSE_VERSION_INSTALLED"
-		echo "Try updating your system by running:"
-		echo "   \$ sudo apt update && sudo apt upgrade -y"
-		echo "and then try re-running this script."
-		handle_exit 1
-	else
-		echo "pass"
-	fi
+    echo "pass"
+    echo -e -n "\nChecking your version of docker compose - "
+    COMPOSE_VERSION_INSTALLED="$(docker compose version --short 2>/dev/null)"
+    if [ -z "$COMPOSE_VERSION_INSTALLED" ] ; then
+        COMPOSE_VERSION_INSTALLED="$(docker-compose version --short 2>/dev/null)"
+    fi
+
+    if [ -z "$COMPOSE_VERSION_INSTALLED" ] ; then
+        echo "fail"
+        echo "Unable to determine docker compose version."
+        handle_exit 1
+    fi
+
+    if dpkg --compare-versions "$COMPOSE_VERSION_MINIMUM" gt "$COMPOSE_VERSION_INSTALLED" ; then
+        echo "fail"
+        echo "Minimum required compose version: $COMPOSE_VERSION_MINIMUM"
+        echo "Installed compose version: $COMPOSE_VERSION_INSTALLED"
+        handle_exit 1
+    fi
+    echo "pass"
 else
-	echo "fail"
-	echo "docker-compose is not installed correctly. The most common reason is"
-	echo "having installed docker and docker-compose without using the official"
-	echo "'convenience script'. You may be able to solve this problem by running"
-	if is_python_script "$COMPOSE_CMD_PATH" ; then
-		echo "   \$ export PIP_BREAK_SYSTEM_PACKAGES=1"
-		echo "   \$ pip3 uninstall -y docker-compose"
-		echo "   \$ sudo pip3 uninstall -y docker-compose"
-		echo "   (ignore any errors from those commands)"
-	else
-		echo "   \$ sudo apt purge -y docker-compose"
-	fi
-	echo "and then try re-running this script."
-	handle_exit 1
+    echo "fail"
+    echo "docker-compose is not installed correctly."
+    if [ -n "$COMPOSE_CMD_PATH" ] && is_python_script "$COMPOSE_CMD_PATH" ; then
+        echo "Try removing pip docker-compose first:"
+        echo "   export PIP_BREAK_SYSTEM_PACKAGES=1"
+        echo "   pip3 uninstall -y docker-compose"
+        echo "   sudo pip3 uninstall -y docker-compose"
+    else
+        echo "Try: sudo apt install -y docker-compose-plugin"
+    fi
+    handle_exit 1
 fi
 
-
-#----------------------------------------------------------------------
-#							Clone IOTstack repo
-#----------------------------------------------------------------------
-
-# does the IOTstack folder already exist?
 if [ ! -d "$IOTSTACK" ] ; then
-	# no! clone from GitHub
-	echo -e "\nCloning IOTstack repository from GitHub"
-	git clone https://github.com/SensorsIot/IOTstack.git "$IOTSTACK"
-	if [ $? -eq 0 -a -d "$IOTSTACK" ] ; then
-		echo "IOTstack cloned successfully into $IOTSTACK"
-	else
-		echo "Unable to clone IOTstack (likely a git or network error)"
-		handle_exit 1
-	fi
+    echo -e "\nCloning IOTstack repository from GitHub"
+    git clone https://github.com/SensorsIot/IOTstack.git "$IOTSTACK"
+    if [ $? -eq 0 ] && [ -d "$IOTSTACK" ] ; then
+        echo "IOTstack cloned successfully into $IOTSTACK"
+    else
+        echo "Unable to clone IOTstack (likely git or network error)"
+        handle_exit 1
+    fi
 else
-	echo -e "\n$IOTSTACK already exists - no need to clone from GitHub"
+    echo -e "\n$IOTSTACK already exists - no need to clone"
 fi
 
-# ensure backups and services directories exist and are owned by $USER
-# https://github.com/SensorsIot/IOTstack/issues/651#issuecomment-2525347511
 mkdir -p "$IOTSTACK/backups" "$IOTSTACK/services"
 sudo chown -R "$USER:$USER" "$IOTSTACK/backups" "$IOTSTACK/services"
-# but, if the influxdb backup dir already exists, put it back to root
 [ -d "$IOTSTACK/backups/influxdb" ] && sudo chown -R "root:root" "$IOTSTACK/backups/influxdb"
 
-# initialise docker-compose global environment file with system timezone
-# see https://git.gsi.de/chef/cookbooks/sys/-/issues/54
-if [ ! -f "$IOTSTACK_ENV" ] || [ $(grep -c "^TZ=" "$IOTSTACK_ENV") -eq 0 ] ; then
-	echo "TZ=$(timedatectl show --value --property=Timezone)" >>"$IOTSTACK_ENV"
+if command -v timedatectl >/dev/null 2>&1 ; then
+    TZ_VALUE="$(timedatectl show --value --property=Timezone 2>/dev/null)"
+else
+    TZ_VALUE="${TZ:-Etc/UTC}"
 fi
 
-#----------------------------------------------------------------------
-#								Python support
-#----------------------------------------------------------------------
+if [ ! -f "$IOTSTACK_ENV" ] || [ "$(grep -c "^TZ=" "$IOTSTACK_ENV")" -eq 0 ] ; then
+    echo "TZ=${TZ_VALUE:-Etc/UTC}" >>"$IOTSTACK_ENV"
+fi
 
-# make sure "python" invokes "python3"
-PYTHON_INVOKES=$(update-alternatives --list python 2>/dev/null)
-PYTHON3_PATH=$(which python3)
+PYTHON_INVOKES="$(update-alternatives --list python 2>/dev/null)"
+PYTHON3_PATH="$(command -v python3)"
 if [ "$PYTHON_INVOKES" != "$PYTHON3_PATH" ] ; then
-	echo -e "\nMaking python3 the default"
-	sudo update-alternatives --install /usr/bin/python python "$PYTHON3_PATH" 1
+    echo -e "\nMaking python3 the default"
+    sudo update-alternatives --install /usr/bin/python python "$PYTHON3_PATH" 1
 fi
 
 echo -e -n "\nChecking your version of Python - "
-PYTHON_VERSION_INSTALLED="$(python --version)"
+PYTHON_VERSION_INSTALLED="$(python --version 2>/dev/null)"
 PYTHON_VERSION_INSTALLED="${PYTHON_VERSION_INSTALLED#*Python }"
-if dpkg --compare-versions "$PYTHON_VERSION_MINIMUM" "gt" "$PYTHON_VERSION_INSTALLED" ; then
-	echo "fail"
-	echo "You have an obsolete version of python installed:"
-	echo "      Minimum version required: $PYTHON_VERSION_MINIMUM"
-	echo "   Version currently installed: $PYTHON_VERSION_INSTALLED"
-	echo "Try updating your system by running:"
-	echo "   \$ sudo apt update && sudo apt upgrade -y"
-	echo "   \$ python --version"
-	echo "If the version number changes, try re-running this script. If not, you"
-	echo "may need to reinstall python3-pip, python3-dev and python3-virtualenv."
-	handle_exit 1
-else
-	echo "pass"
+if [ -z "$PYTHON_VERSION_INSTALLED" ] ; then
+    echo "fail"
+    echo "Unable to run python."
+    handle_exit 1
 fi
 
-# implement menu requirements
+if dpkg --compare-versions "$PYTHON_VERSION_MINIMUM" gt "$PYTHON_VERSION_INSTALLED" ; then
+    echo "fail"
+    echo "Minimum required Python version: $PYTHON_VERSION_MINIMUM"
+    echo "Installed Python version: $PYTHON_VERSION_INSTALLED"
+    handle_exit 1
+fi
+echo "pass"
+
 if [ -e "$IOTSTACK_MENU_REQUIREMENTS" ] ; then
-	echo -e "\nChecking and updating IOTstack dependencies (pip)" 
-	echo "Note: pip3 installs bypass externally-managed environment check"
-	PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install -U -r "$IOTSTACK_MENU_REQUIREMENTS"
+    echo -e "\nChecking and updating IOTstack dependencies (pip)"
+    echo "Note: pip3 installs bypass externally-managed environment check"
+    PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install -U -r "$IOTSTACK_MENU_REQUIREMENTS"
 fi
 
-# trigger re-creation of venv on next menu launch. Strictly speaking,
-# sudo is not required for this but it protects against accidental prior
-# use of sudo when the venv was created
 sudo rm -rf "$IOTSTACK_MENU_VENV_DIR"
-
-
-#----------------------------------------------------------------------
-#						Raspberry Pi boot options
-#----------------------------------------------------------------------
-
-# set cmdline options (if possible - Raspberry Pi dependency)
-TARGET="/boot/firmware/cmdline.txt"
-[ -e "$TARGET" ] || TARGET="/boot/cmdline.txt"
-if [ -e "$TARGET" ] ; then
-	echo -e -n "\nChecking Raspberry Pi boot-time options - "
-	unset APPEND
-	for OPTION in $CMDLINE_OPTIONS ; do
-		if [ $(grep -c "$OPTION" "$TARGET") -eq 0 ] ; then
-			APPEND="$APPEND $OPTION"
-		fi
-	done
-	if [ -n "$APPEND" ] ; then
-		echo "appending$APPEND"
-		sudo sed -i.bak "s/$/$APPEND/" "$TARGET"
-		REBOOT_REQUIRED=true
-	else
-		echo "no modifications needed"
-	fi
-fi
-
-
-#----------------------------------------------------------------------
-#							normal exit
-#----------------------------------------------------------------------
 
 handle_exit 0
